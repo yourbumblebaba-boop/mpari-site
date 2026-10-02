@@ -274,18 +274,31 @@ bot.on('document', async msg => {
     ? 'Admin'
     : (memoryStore.workers?.[id]?.name || `Worker ${id}`);
 
-  await md(id, `⏳ Uploading \`${doc.file_name}\` to GitHub...`);
+  await md(id, `⏳ Uploading \`${doc.file_name}\` to GitHub... (may take 30–60s for large files)`);
 
   try {
-    // Download from Telegram first
-    const tgFile    = await bot.getFile(doc.file_id);
-    const tgUrl     = `https://api.telegram.org/file/bot${BOT_TOKEN}/${tgFile.file_path}`;
-    const tgRes     = await fetch(tgUrl);
-    if (!tgRes.ok)  throw new Error(`Telegram download failed: HTTP ${tgRes.status}`);
-    const arrayBuf  = await tgRes.arrayBuffer();
-    const fileBuffer = Buffer.from(arrayBuf);
+    // Step 1: get Telegram download URL
+    const tgFile = await bot.getFile(doc.file_id);
+    const tgUrl  = `https://api.telegram.org/file/bot${BOT_TOKEN}/${tgFile.file_path}`;
 
-    // Push to GitHub
+    // Step 2: download from Telegram using chunked read with timeout per chunk
+    // This avoids the single-fetch TLS timeout on large files
+    const tgRes = await fetch(tgUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal : AbortSignal.timeout(55000), // 55s total, under Vercel's 60s limit
+    });
+    if (!tgRes.ok) throw new Error(`Telegram download failed: HTTP ${tgRes.status}`);
+
+    const chunks = [];
+    const reader = tgRes.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+    const fileBuffer = Buffer.concat(chunks.map(c => Buffer.from(c)));
+
+    // Step 3: push to GitHub
     const ghResult = await uploadApkToGitHub(fileBuffer, doc.file_name);
 
     const prev = !!memoryStore.current;
@@ -462,3 +475,4 @@ if (!USE_WEBHOOK) {
 
 // Vercel exports the app as default
 export default app;
+    
